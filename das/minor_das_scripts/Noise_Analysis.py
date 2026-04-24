@@ -1,6 +1,7 @@
 # Noise Analysis
 
 import os
+import json
 import requests
 from concurrent.futures import ProcessPoolExecutor
 
@@ -14,6 +15,14 @@ import dascore as dc
 from matplotlib.colors import LogNorm
 
 
+# Save-state caches: an .npz holds the amplitude matrices while a
+# .json holds the magnitude-sorted labels. If both exist
+# and contain the expected events, ProcessPoolExecutor block
+# is skipped.
+CACHE_NPZ  = "noise_analysis_cache.npz"
+CACHE_JSON = "noise_analysis_cache.json"
+
+
 def load_coords(filepath):
     """Loads .xycz file, and calculates cumulative distance."""
     df = pd.read_csv(filepath, sep=r'\s+', header=None,
@@ -22,7 +31,6 @@ def load_coords(filepath):
 
     df['lon'] = df['lon'].apply(lambda x: x - 360 if x > 180 else x)
 
-    # Haversine distance calculation
     R = 6371.0
     lat, lon = np.radians(df['lat'].values), np.radians(df['lon'].values)
     dlat, dlon = np.diff(lat), np.diff(lon)
@@ -74,7 +82,6 @@ def get_magnitude(event_id):
     url = (f"https://earthquake.usgs.gov/fdsnws/event/1/query?"
            f"eventid={event_id}&format=geojson")
     try:
-        # Using requests.get instead of a Session prevents Pickling errors
         response = requests.get(url, timeout=5)
         if response.status_code == 200:
             data = response.json()
@@ -104,7 +111,7 @@ def plot_and_save(terra_coords, data_matrix, valid_labels, title,
     labels_with_avg = ["Event Average"] + valid_labels
 
     Z = np.array(data_matrix_with_avg)
-    Z = np.abs(Z)  # Safe for Floor data, necessary for Deviation data
+    Z = np.abs(Z)
     Z[Z <= 0] = 1e-10
 
     X_orig = terra_coords['dist_km'].values
@@ -149,6 +156,42 @@ def plot_and_save(terra_coords, data_matrix, valid_labels, title,
     plt.close(fig)
 
 
+def _try_load_cache(cache_npz, cache_json, expected_events):
+    """
+    Attempts to load cached matrices and labels.
+
+    Returns (matrix_5s, matrix_20s, valid_labels) if the cache exists,
+    is readable, and contains all expected events. Returns None otherwise.
+    """
+    if not (os.path.exists(cache_npz) and os.path.exists(cache_json)):
+        return None
+
+    try:
+        with open(cache_json) as f:
+            meta = json.load(f)
+
+        cached_ids = {entry['event_id'] for entry in meta}
+        expected_ids = {fname.split('_')[0] for fname in expected_events}
+
+        if not expected_ids.issubset(cached_ids):
+            missing = expected_ids - cached_ids
+            print(f"Stale Cache: Missing {len(missing)} event(s), "
+                  f"reprocessing all...")
+            return None
+
+        c = np.load(cache_npz, allow_pickle=False)
+        matrix_5s  = c['matrix_5s']
+        matrix_20s = c['matrix_20s']
+        valid_labels = [entry['label'] for entry in meta]
+
+        print(f"[CACHE HIT] Loaded {len(valid_labels)} events from cache.")
+        return matrix_5s, matrix_20s, valid_labels
+
+    except Exception as e:
+        print(f"Cache corrupted {e} reprocessing...")
+        return None
+
+
 if __name__ == "__main__":
     base_dir = "/Users/ed/research_code/das"
     noise_game_dir = os.path.join(base_dir, "das_records/good-events-3.2-up")
@@ -157,6 +200,9 @@ if __name__ == "__main__":
     )
     figures_dir = os.path.join(base_dir, "das_figures")
     os.makedirs(figures_dir, exist_ok=True)
+
+    cache_npz  = os.path.join(figures_dir, CACHE_NPZ)
+    cache_json = os.path.join(figures_dir, CACHE_JSON)
 
     good_terra_events = [
         "ak0237eejw69_TERRA.h5", "ak023aw5mbdk_TERRA.h5",
@@ -184,40 +230,59 @@ if __name__ == "__main__":
 
     terra_coords = load_coords(coords_path)
     target_channels = terra_coords['cha'].values
-    args_list = [(fname, noise_game_dir, target_channels)
-                 for fname in good_terra_events]
-
-    print(f"Parallel processing {len(args_list)} events...")
-
-    with ProcessPoolExecutor() as ex:
-        results = list(ex.map(process_event, args_list))
-
-    # Filter out events that failed to process (returned None)
-    extracted_data = [res for res in results 
-                      if res[2] is not None and res[3] is not None]
-
-    if not extracted_data:
-        print("Error: No data successfully extracted.")
-        exit(1)
-
-    extracted_data.sort(key=lambda x: x[0], reverse=True)
     
-    matrix_5s = []
-    matrix_20s = []
-    valid_labels = []
+    # Caching to .json
+    cached = _try_load_cache(cache_npz, cache_json, good_terra_events)
 
-    for mag, event_id, row_5s, row_20s in extracted_data:
-        matrix_5s.append(row_5s)
-        matrix_20s.append(row_20s)
-        label = (f"M {mag:.1f} - {event_id}" if mag != -1.0 
-                 else f"M ? - {event_id}")
-        valid_labels.append(label)
+    if cached is not None:
+        matrix_5s, matrix_20s, valid_labels = cached
+    else:
 
-    matrix_5s = np.array(matrix_5s)
-    matrix_20s = np.array(matrix_20s)
-    median_5s = np.nanmedian(matrix_5s, axis=0)
-    norm_matrix_5s = matrix_5s - median_5s
-    median_20s = np.nanmedian(matrix_20s, axis=0)
+        args_list = [(fname, noise_game_dir, target_channels)
+                     for fname in good_terra_events]
+        print(f"Parallel processing {len(args_list)} events...")
+
+        with ProcessPoolExecutor() as ex:
+            results = list(ex.map(process_event, args_list))
+
+        extracted_data = [res for res in results
+                          if res[2] is not None and res[3] is not None]
+
+        if not extracted_data:
+            print("Error: No data successfully extracted.")
+            exit(1)
+
+        extracted_data.sort(key=lambda x: x[0], reverse=True)
+
+        matrix_5s    = []
+        matrix_20s   = []
+        valid_labels = []
+        cache_meta   = []
+
+        for mag, event_id, row_5s, row_20s in extracted_data:
+            matrix_5s.append(row_5s)
+            matrix_20s.append(row_20s)
+            label = (f"M {mag:.1f} - {event_id}" if mag != -1.0
+                     else f"M ? - {event_id}")
+            valid_labels.append(label)
+            cache_meta.append({'event_id': event_id, 'label': label})
+
+        matrix_5s  = np.array(matrix_5s)
+        matrix_20s = np.array(matrix_20s)
+
+        # Caching to .npz
+        np.savez_compressed(cache_npz,
+                            matrix_5s=matrix_5s,
+                            matrix_20s=matrix_20s)
+        with open(cache_json, 'w') as f:
+            json.dump(cache_meta, f, indent=4)
+        print(f"Matrices saved to: {cache_npz}")
+        print(f"Labels saved to: {cache_json}")
+
+
+    median_5s       = np.nanmedian(matrix_5s, axis=0)
+    norm_matrix_5s  = matrix_5s - median_5s
+    median_20s      = np.nanmedian(matrix_20s, axis=0)
     norm_matrix_20s = matrix_20s - median_20s
 
     plot_and_save(terra_coords, matrix_5s.tolist(), valid_labels,
