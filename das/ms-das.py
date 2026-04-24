@@ -4,7 +4,7 @@ import warnings
 from concurrent.futures import ProcessPoolExecutor
 
 import matplotlib
-matplotlib.use('Agg') 
+matplotlib.use('Agg')
 
 import pandas as pd
 import numpy as np
@@ -29,8 +29,15 @@ coords_file = os.path.join(base_project_dir,
                            "das_coords_bathymetry",
                            "TERRA_coords.xycz")
 figures_dir = os.path.join(base_project_dir, "das_figures")
-cache_file = os.path.join(base_project_dir, "event_metadata_cache.json")
+metadata_cache = os.path.join(base_project_dir, "event_metadata_cache.json")
+
+# Save-state cache: two files, .npz and .json
+# Stores all derived arrays to skip processing on repeats.
+master_cache_npz = os.path.join(figures_dir, "TERRA_master_arrays.npz")
+master_cache_json = os.path.join(figures_dir, "TERRA_master_stats.json")
+
 os.makedirs(figures_dir, exist_ok=True)
+
 pdf_path = os.path.join(figures_dir, "TERRA_good_events_arrivals.pdf")
 csv_path = os.path.join(figures_dir, "TERRA_event_amplitudes.csv")
 
@@ -53,8 +60,8 @@ good_terra_events = [
 
 
 def get_and_cache_metadata(file_list):
-    if os.path.exists(cache_file):
-        with open(cache_file, 'r') as j:
+    if os.path.exists(metadata_cache):
+        with open(metadata_cache, 'r') as j:
             return json.load(j)
 
     usgs_client = Client("USGS")
@@ -70,32 +77,111 @@ def get_and_cache_metadata(file_list):
                        "time": str(origin.time)}
         except Exception:
             if eid == "ak023gjh7z4b":
-                data[f] = {"lat": 60.335,
-                           "lon": -151.754,
-                           "dep": 71300.0,
-                           "time": "2023-12-26T06:30:02.910"}
+                data[f] = {"lat": 60.335, "lon": -151.754,
+                           "dep": 71300.0, "time": "2023-12-26T06:30:02.910"}
             elif eid == "ak023d3dyqv0":
-                data[f] = {"lat": 60.320,
-                           "lon": -150.699,
-                           "dep": 79300.0,
-                           "time": "2023-10-12T03:02:49.457"}
-    with open(cache_file, 'w') as j:
+                data[f] = {"lat": 60.320, "lon": -150.699,
+                           "dep": 79300.0, "time": "2023-10-12T03:02:49.457"}
+    with open(metadata_cache, 'w') as j:
         json.dump(data, j, indent=4)
     return data
 
 
 def load_coords(filepath):
-    df = pd.read_csv(filepath,
-                     sep=r'\s+',
-                     header=None,
+    df = pd.read_csv(filepath, sep=r'\s+', header=None,
                      names=['lon', 'lat', 'cha', 'dep']).dropna()
     df['lon'] = np.where(df['lon'] > 180, df['lon'] - 360, df['lon'])
     return df
 
 
+def _plot_event_figure(fname, data_array, times_sec, p_win_low, p_win_high,
+                       s_win_low, s_win_high, max_amps, p_max_amps,
+                       pick_times, pick_chans, slant_km_list,
+                       vmax, z_km, perc_inside, limit, figures_dir):
+    """Shared plotting helper that saves a temporary PNG."""
+    event_id = fname.split('_')[0]
+    chans = np.arange(limit)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 10),
+                                   gridspec_kw={'width_ratios': [3, 1]})
+
+    for i in range(limit):
+        ax1.plot(times_sec,
+                 i + (data_array[:, i] / vmax) * 2.5,
+                 color='black', lw=0.4, alpha=0.3)
+
+    ax1.fill_betweenx(chans, p_win_low, p_win_high, color='blue',
+                      alpha=0.1, label='P-Window (-2s/+4s)')
+    ax1.fill_betweenx(chans, s_win_low, s_win_high, color='red',
+                      alpha=0.1, label='S-Window (-6s/+15s)')
+    ax1.scatter(pick_times, pick_chans, color='magenta', s=15,
+                alpha=0.2, label='Max Energy', zorder=5)
+
+    min_slant_val = slant_km_list[np.argmin(slant_km_list)]
+    title_string = (f"ID: {event_id} | Depth: {z_km:.1f} km | "
+                    f"Straightline Distance: {min_slant_val:.2f} km\n"
+                    f"{perc_inside:.1f}% of Max Amplitudes within S-window")
+    ax1.set_title(title_string)
+    ax1.set_xlabel("Seconds from Origin")
+    ax1.set_ylabel("Channel Index (Decimated x20)")
+    ax1.invert_yaxis()
+    ax1.legend(loc='upper right')
+    ax1.grid(True, alpha=0.1)
+
+    ax2.plot(max_amps, chans, color='magenta', lw=1.5,
+             label='Global Max (Abs)')
+    ax2.set_title("Max Absolute Amplitude Profile")
+    ax2.set_xlabel("Amplitude")
+    ax2.set_xscale('log')
+    ax2.set_xlim(-1, 1000)
+    ax2.invert_yaxis()
+    ax2.legend(fontsize='small')
+    ax2.grid(True, which='both', alpha=0.2)
+
+    plt.tight_layout()
+    temp_fig_path = os.path.join(figures_dir, f"temp_{event_id}.png")
+    fig.savefig(temp_fig_path, dpi=200)
+    plt.close(fig)
+    return temp_fig_path
+
+
 def process_single_event(args):
-    """Worker function to process a single event independently"""
-    fname, info, records_path, terra_coords, figures_dir = args
+    """
+    Worker function to process a single event, utilizing passed-in caches.
+    If 'cached_arrays' is populated, it skips directly to plotting.
+    Otherwise, it processes the data and returns the arrays for saving.
+    """
+    (fname, info, records_path, terra_coords, figures_dir, 
+     cached_stat, cached_arrays) = args
+    
+    event_id = fname.split('_')[0]
+
+    if cached_stat is not None and cached_arrays is not None:
+        try:
+            temp_path = _plot_event_figure(
+                fname,
+                data_array    = cached_arrays['data_array'],
+                times_sec     = cached_arrays['times_sec'],
+                p_win_low     = cached_arrays['p_win_low'],
+                p_win_high    = cached_arrays['p_win_high'],
+                s_win_low     = cached_arrays['s_win_low'],
+                s_win_high    = cached_arrays['s_win_high'],
+                max_amps      = cached_arrays['max_amps'],
+                p_max_amps    = cached_arrays['p_max_amps'],
+                pick_times    = cached_arrays['pick_times'],
+                pick_chans    = cached_arrays['pick_chans'],
+                slant_km_list = cached_arrays['slant_km_list'],
+                vmax          = float(cached_arrays['vmax']),
+                z_km          = float(cached_arrays['z_km']),
+                perc_inside   = float(cached_arrays['perc_inside']),
+                limit         = int(cached_arrays['limit']),
+                figures_dir   = figures_dir,
+            )
+            return temp_path, cached_stat, cached_stat['perc_inside_s'], None
+            
+        except Exception as e:
+            print(f"Cache Error {event_id}: {e} — reprocessing...")
+
 
     try:
         model = TauPyModel(model="ak135")
@@ -112,15 +198,16 @@ def process_single_event(args):
         ) / np.timedelta64(1, 's')
         decimated_coords = terra_coords.iloc[::20]
         limit = min(len(decimated_coords), data_array.shape[1])
-        z_km = info['dep'] / 1000.0 
+        z_km = info['dep'] / 1000.0
 
         p_win_low, p_win_high = [], []
         s_win_low, s_win_high = [], []
-        max_amps = []
-        p_max_amps = []
-        pick_times, pick_chans = [], []
+        max_amps      = []
+        p_max_amps    = []
+        pick_times    = []
+        pick_chans    = []
         slant_km_list = []
-        inside_s_count = 0
+        inside_s_count  = 0
         valid_s_channels = 0
 
         for i in range(limit):
@@ -165,94 +252,115 @@ def process_single_event(args):
                 if s_low <= max_idx_time <= s_high:
                     inside_s_count += 1
 
-        if valid_s_channels > 0:
-            perc_inside = (inside_s_count / valid_s_channels) * 100
-        else:
-            perc_inside = 0
-
-        min_slant_idx = np.argmin(slant_km_list)
-        min_slant_val = slant_km_list[min_slant_idx]
+        perc_inside = (inside_s_count / valid_s_channels * 100
+                       if valid_s_channels > 0 else 0)
+        min_slant_val = slant_km_list[np.argmin(slant_km_list)]
+        vmax = np.nanpercentile(np.abs(data_array), 99.5) or 1.0
 
         stat_dict = {
-            "event_id": fname.split('_')[0],
-            "perc_inside_s": perc_inside,
-            "mean_p_max": np.mean(p_max_amps),
+            "event_id":       event_id,
+            "perc_inside_s":  perc_inside,
+            "mean_p_max":     np.mean(p_max_amps),
             "mean_total_max": np.mean(max_amps),
-            "min_slant_km": min_slant_val
+            "min_slant_km":   min_slant_val,
         }
 
-        # Plotting starts here
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 10),
-                                       gridspec_kw={'width_ratios': [3, 1]})
-        vmax = np.nanpercentile(np.abs(data_array), 99.5) or 1.0
-        chans = np.arange(limit)
+        arrays_dict = {
+            'data_array':    data_array,
+            'times_sec':     times_sec,
+            'p_win_low':     np.array(p_win_low),
+            'p_win_high':    np.array(p_win_high),
+            's_win_low':     np.array(s_win_low),
+            's_win_high':    np.array(s_win_high),
+            'max_amps':      np.array(max_amps),
+            'p_max_amps':    np.array(p_max_amps),
+            'pick_times':    np.array(pick_times),
+            'pick_chans':    np.array(pick_chans),
+            'slant_km_list': np.array(slant_km_list),
+            'vmax':          np.array([vmax]),
+            'z_km':          np.array([z_km]),
+            'perc_inside':   np.array([perc_inside]),
+            'limit':         np.array([limit]),
+        }
 
-        for i in range(limit):
-            ax1.plot(times_sec,
-                     i + (data_array[:, i] / vmax) * 2.5,
-                     color='black',
-                     lw=0.4,
-                     alpha=0.3)
-
-        ax1.fill_betweenx(chans, p_win_low, p_win_high, color='blue',
-                          alpha=0.1, label='P-Window (-2s/+4s)')
-        ax1.fill_betweenx(chans, s_win_low, s_win_high, color='red',
-                          alpha=0.1, label='S-Window (-6s/+15s)')
-        ax1.scatter(pick_times, pick_chans, color='magenta', s=15,
-                    alpha=0.2, label='Max Energy', zorder=5)
-
-        title_string = (f"ID: {fname.split('_')[0]} | Depth: {z_km:.1f} km | "
-                     f"Straightline Distance: {min_slant_val:.2f} km\n"
-                     f"{perc_inside:.1f}% of Max Amplitudes within S-window")
-        ax1.set_title(title_string)
-        ax1.set_xlabel("Seconds from Origin")
-        ax1.set_ylabel("Channel Index (Decimated x20)")
-        ax1.invert_yaxis()
-        ax1.legend(loc='upper right')
-        ax1.grid(True, alpha=0.1)
-
-        ax2.plot(max_amps, chans, color='magenta', lw=1.5,
-                 label='Global Max (Abs)')
-        ax2.set_title("Max Absolute Amplitude Profile")
-        ax2.set_xlabel("Amplitude")
-        ax2.set_xscale('log')
-        ax2.set_xlim(-1, 1000)
-        ax2.invert_yaxis()
-        ax2.legend(fontsize='small')
-        ax2.grid(True, which='both', alpha=0.2)
-
-        plt.tight_layout()
-        temp_fig_path = os.path.join(figures_dir,
-                                     f"temp_{fname.split('_')[0]}.png")
-        fig.savefig(temp_fig_path, dpi=200)
-        plt.close(fig)
-
-        return temp_fig_path, stat_dict, perc_inside
+        temp_path = _plot_event_figure(
+            fname,
+            data_array    = data_array,
+            times_sec     = times_sec,
+            p_win_low     = arrays_dict['p_win_low'],
+            p_win_high    = arrays_dict['p_win_high'],
+            s_win_low     = arrays_dict['s_win_low'],
+            s_win_high    = arrays_dict['s_win_high'],
+            max_amps      = arrays_dict['max_amps'],
+            p_max_amps    = arrays_dict['p_max_amps'],
+            pick_times    = arrays_dict['pick_times'],
+            pick_chans    = arrays_dict['pick_chans'],
+            slant_km_list = arrays_dict['slant_km_list'],
+            vmax          = vmax,
+            z_km          = z_km,
+            perc_inside   = perc_inside,
+            limit         = limit,
+            figures_dir   = figures_dir,
+        )
+        
+        return temp_path, stat_dict, perc_inside, arrays_dict
 
     except Exception as e:
         print(f"[ERROR] {fname}: {e}")
-        return None, None, None
+        return None, None, None, None
 
 
 if __name__ == '__main__':
     event_metadata = get_and_cache_metadata(good_terra_events)
     terra_coords = load_coords(coords_file)
 
-    event_stats = []
-    s_window_percentages = []
-    args_list = [(fname, info, records_path, terra_coords, figures_dir)
-                 for fname, info in event_metadata.items()]
+    global_stats = {}
+    if os.path.exists(master_cache_json):
+        with open(master_cache_json, 'r') as f:
+            global_stats = json.load(f)
 
-    print(f"Parallel processing {len(args_list)} events...")
+    global_arrays = {}
+    if os.path.exists(master_cache_npz):
+        with np.load(master_cache_npz, allow_pickle=False) as c:
+            for k in c.files:
+                global_arrays[k] = c[k]
 
-    # Execute in parallel
+    args_list = []
+    keys_needed = [
+        'data_array', 'times_sec', 'p_win_low', 'p_win_high',
+        's_win_low', 's_win_high', 'max_amps', 'p_max_amps',
+        'pick_times', 'pick_chans', 'slant_km_list',
+        'vmax', 'z_km', 'perc_inside', 'limit'
+    ]
+
+    for fname, info in event_metadata.items():
+        event_id = fname.split('_')[0]
+        cached_stat = global_stats.get(event_id)
+        cached_arrays = None
+
+        if cached_stat is not None:
+            try:
+                cached_arrays = {k: global_arrays[f"{event_id}_{k}"] 
+                                 for k in keys_needed}
+            except KeyError:
+                cached_arrays = None
+                cached_stat = None  # Force reprocess if NPZ is missing arrays
+
+        args_list.append((fname, info, records_path, terra_coords, 
+                          figures_dir, cached_stat, cached_arrays))
+
+    print(f"Processing {len(args_list)} events..")
+
     with ProcessPoolExecutor() as ex:
         results = list(ex.map(process_single_event, args_list))
 
-    # Assemble PDF from saved figures afterward
+    event_stats = []
+    s_window_percentages = []
+    needs_save = False
+
     with PdfPages(pdf_path) as pdf:
         for res in results:
-            temp_path, stat, perc = res
+            temp_path, stat, perc, new_arrays = res
 
             if temp_path is not None:
                 fig = plt.figure(figsize=(16, 10))
@@ -268,19 +376,34 @@ if __name__ == '__main__':
                 event_stats.append(stat)
                 s_window_percentages.append(perc)
 
-    if s_window_percentages:
-        mean_val = np.mean(s_window_percentages)
-        median_val = np.median(s_window_percentages)
-        min_val = np.min(s_window_percentages)
-        max_val = np.max(s_window_percentages)
+            if new_arrays is not None:
+                event_id = stat['event_id']
+                global_stats[event_id] = stat
+                for k, v in new_arrays.items():
+                    global_arrays[f"{event_id}_{k}"] = v
+                needs_save = True
 
-        print("\n% Max S-Amplitudes Summary")
-        print(f"Mean:   {mean_val:.2f}%")
-        print(f"Median: {median_val:.2f}%")
-        print(f"Range:  {min_val:.2f}% to {max_val:.2f}%")
+    # Caching
+    if needs_save:
+        print("\nUpdating master cache files...")
+        np.savez_compressed(master_cache_npz, **global_arrays)
+        with open(master_cache_json, 'w') as f:
+            json.dump(global_stats, f, indent=4)
+
+    if s_window_percentages:
+        mean_val   = np.mean(s_window_percentages)
+        median_val = np.median(s_window_percentages)
+        min_val    = np.min(s_window_percentages)
+        max_val    = np.max(s_window_percentages)
 
     df_results = pd.DataFrame(event_stats)
     df_results.to_csv(csv_path, index=False)
 
     print(f"\nPDF saved to {pdf_path}")
     print(f"CSV saved to {csv_path}")
+    print(f"Master cache maintained at {master_cache_npz}")
+
+    print("\n% Max S-Amplitudes Summary")
+    print(f"Mean:   {mean_val:.2f}%")
+    print(f"Median: {median_val:.2f}%")
+    print(f"Range:  {min_val:.2f}% to {max_val:.2f}%")
