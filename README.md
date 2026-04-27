@@ -1,42 +1,133 @@
-# research_code
-My scripts, files, etc. from my research, and for my GEOS694 final project. Current subfolder is `das`.  
+# DAS Project
 
-## What, Why, and How:
+This project contains all research code for DAS (Distributed Acoustic Sensing) seismology conducted using fiber-optic cables as arrays of seismometers. Two cables are used: **TERRA** and **KKFLS**, both deployed in lower Cook Inlet, Alaska.
 
-`das` contains all of my DAS (Distributed Acoustic Sensing) research. This is, in other words, seismology conducted using fiber-optic cables as arrays of seismometers. As this folder is currently in use it is a bit messy, but here are the main features:
+---
+## Project Details:
+**Task #1:** Parallelization/Concurrency  
+**Task #2:** State Saving
 
-- `das_coords_bathymetry`  
-  This is where the `.xcyz` bathymetry files for the cable coordinates are stored.
+## Installation
 
-- `das_freq_plots`  
-  This contains early frequency-filtering trials of the DAS data. The code to generate these figures exists, in some form, in `minor_das_scripts/Uberfigure.ipynb`.
+**Prerequisites:** Conda, Miniconda, Mamba, or equivalent.
 
-- `minor_das_scripts`  
-  This folder is where various scripts not currently in use are stored. There is often a figure or two in this folder as well.
-    - Within `minor_das_scripts` are the majority of scripts under this project.  
+```bash
+# 1. Clone / download the project, then cd into it
+cd Final_Project
 
-    -  `DAS_Bathymetry.ipynb` generates local bathymetry to `das_seafloor_bathymetry.png`, and reads the files in `das_coords_bathymetry/` to render a 3D plot of the seafloor with both the KKFL-S and TERRA cable routes mapped onto it.
+# 2. Create the environment (first time only — takes a few minutes)
+conda env create -f environment.yaml
 
-    - `ETI2.0 Slide Maker.ipynb` is a quickly-made script to create introductory figures for a conference presentation.  It loads a single event file to create figures of a few waveforms over a small distance.
+# 3. Activate it
+conda activate dasenv
 
-    - `DAS_Raw_Noise_Files.ipynb` plots absolute median strain across channels in both cables for a set of low-magnitude events, loading the final 45 seconds of each 2-minute long event and plotting their noise profiles.
+# 4. Verify the key packages loaded correctly
+python -c "import dascore, obspy, cartopy; print('All good!')"
+```
 
-    - `event_metadata_cache.json` is a JSON cache of seismic events spanning June–December 2023, with the USGS event ID serving as the key, and storing latitude, longitude, depth, and origin time.  This JSON is used in various scripts throughout the project to avoid repeated API calls.
+To update the environment after changing `environment.yaml`:
+```bash
+conda env update -f environment.yaml --prune
+```
 
-    - `das_seafloor_bathymetry.png` is the output of `DAS_Bathymetry.ipynb`, and shows the two cables (KKFL-S in Red, TERRA in Blue) overlaid on a 3D seafloor bathymetry map of the lower Cook Inlet region of Alaska.  Properly, this file would be in `das_figures/` but I haven't rerouted that script's output.
+To fully remove the environment:
+```bash
+conda deactivate
+conda env remove -n dasenv
+```
 
-    - `Mapview_TERRA_events.ipynb` plots the TERRA cable and all cached seismic events onto a regional Albers Equal Area map using Cartopy, made for a conference presentation.
+---
 
-    - `DAS_TauP_Spaghetti_Maps.ipynb` contains two related scripts, the first uses TauP to compute P and S-wave travel times between the first and last cable channels for each event with the ak135 velocity model and outputs a summary table.  The second generates plots of predicted arrival times across all cable channels for every event simultaneously, and these outputs look a bit like spaghetti thrown at a wall, hence the filename.
+## Directory Layout
 
-    - `Noise_Analysis.ipynb` is the primary noise characterization script, and has become a 'working file' similar to `MS-DAS.ipynb`.  As it is in active development, this description may not be fully up to date.  For each event, this script extracts median absolute strain amplitude over the first 5 seconds and last 20 seconds for comparison purposes, then displays noise amplitude readings for each event, sorted by event magnitude, which are fetched live from the USGS API.  Contains multiple plotting variants.
+```
+Final_Project/
+├── README.md                         ← this file
+├── environment.yaml                  ← conda environment definition
+└── das/                              ← main project directory
+    ├── ms-das.py                     ← primary research pipeline script
+    ├── event_metadata_cache.json     ← event lat/lon/depth cache used
+    │                                    by Mapview_TERRA_events.py
+    ├── das_coords_bathymetry/        ← cable geometry and seafloor data
+    │   ├── TERRA_coords.xycz         ← TERRA cable coordinates + depth
+    │   ├── KKFLS_coords.xycz         ← KKFLS cable coordinates + depth
+    │   └── PW24.xyz                  ← regional seafloor bathymetry grid
+    ├── das_records/
+    │   └── good-events-3.2-up/
+    │       └── <event_id>_TERRA.h5   ← HDF5 event files (user-downloaded due 
+    │                                    to extremely large filesizes)
+    ├── das_figures/                  ← auto-created on first run,
+    │                                    stores figures & caches
+    └── minor_das_scripts/
+        ├── DAS_URL_table.py
+        ├── DAS_USGS_File_Renaming.py
+        ├── DAS_Bathymetry.py
+        ├── DAS_Raw_Noise_Files.py
+        ├── Mapview_TERRA_events.py
+        ├── ETI2_0_Slide_Maker.py
+        ├── Noise_Analysis.py
+        ├── DAS_TauP_Spaghetti_Maps.py
+        ├── uberfigure_TERRA_only.py
+        └── uberfigure_combined.py
+```
 
-    - `DAS_URL_table.ipynb` Queries the USGS FDSN event service for M3.2+ earthquakes within 150 km of the cable center during 2023 and prints a formatted table of origin time, magnitude, coordinates, and depth. Used for manually identifying events to download from the DAS data portal, which does not support automated crawling.
-    
-    - `DAS_USGS_File_Renaming.ipynb` renames raw DAS files from the website to USGS event ID format (e.g. `ak0237eejw69_TERRA.h5`) to match `event_metadata_cache.json`.  This one might not be terribly useful as it was only for renaming from my initial scheme.
+---
 
-    - `Uberfigure.ipynb` produces a series of wiggle plots of the complete DAS cable waveforms, with zoomed-in subplots.  This gave the primary outputs during early data exploration days.  Resulting figures are saved to `das_freq_plots/`.
+## Scripts
 
-#
-- `MS-DAS.ipynb`  
-  Named to convey the proper pronunciation of DAS by likening it to the operating system MS-DOS, this is the main active research environment, containing multiple scripts within its Jupyter Notebook code blocks. Over time, inactive or mostly finalized scripts are broken out of `MS-DAS.ipynb` and into separate notebook files in `das/minor_das_scripts/`, then reworked into functioning in their new location. The current `MS-DAS.ipynb` file contains a few minor scripts along with the main functionality script focusing on plotting calculated arrival-time windows for multiple events over observed arrival-time data.
+### `ms-das.py` — Main Research Pipeline
+The primary working script. Loads DAS event files, computes TauP-predicted P and S arrival windows, plots observed strain data against those windows, and exports results as a multi-page PDF and CSV. This is the main testing ground for core analysis functionality, particularly for selecting time windows used to calculate wave amplitudes. The name is a nod to MS-DOS — because the correct pronunciation of DAS rhymes with the OS.
+
+### `minor_das_scripts/`
+
+| Script | What it does | How | Why |
+|---|---|---|---|
+| `DAS_URL_table.py` | Prints a formatted table of USGS events for a given URL query | Queries the USGS FDSN event service for M ≥ 3.2 earthquakes within 150 km of lower Cook Inlet, Jun–Dec 2023 | Useful as a manual check on query results and as a reference when renaming downloaded files |
+| `DAS_USGS_File_Renaming.py` | Renames downloaded DAS files from the old date-based naming scheme to USGS event ID-based names | Maps old filenames to their USGS IDs (e.g. `ak0237eejw69_TERRA.h5`) using a hardcoded lookup table; set `DRY_RUN = False` to apply | Standardizes filenames to match keys in `event_metadata_cache.json` |
+| `DAS_Bathymetry.py` | 3-D wireframe and surface bathymetry map with both cable tracks overlaid | Reads `.xycz` coordinate files and renders a 3-D matplotlib figure of the seafloor with KKFLS and TERRA routes plotted | Visualizes the physical layout of both cables relative to the seafloor of lower Cook Inlet |
+| `DAS_Raw_Noise_Files.py` | Per-event raw noise profiles for both cables | Loads the final 45 s of each event file and plots absolute median phase/strain amplitude vs. distance along the cable | Used to characterize the raw background noise floor of each cable independently |
+| `Mapview_TERRA_events.py` | Albers Equal Area map of the TERRA cable and earthquake epicenters | Reads `event_metadata_cache.json` and the TERRA coordinate file, then renders a cartopy map with an Alaska overview inset | Originally produced for a conference presentation |
+| `ETI2_0_Slide_Maker.py` | Single-channel waveform plot for a specific event and distance | Loads one event file, isolates the channel nearest a target distance, high-pass filters above 1 Hz, and saves a PDF | A quick script for generating introductory waveform figures for presentations |
+| `Noise_Analysis.py` | Heatmap of pre-event noise floors sorted by earthquake magnitude | Extracts median absolute strain amplitude for the first 5 s and last 20 s of each event, fetches live magnitudes from the USGS API, and renders a log-scale heatmap with bathymetry | Active working script for understanding noise patterns and deviations across different event magnitudes |
+| `DAS_TauP_Spaghetti_Maps.py` | Per-channel TauP moveout curves for each event, saved to a multi-page PDF | Computes P and S travel times from the ak135 model for every cable channel and plots predicted arrival time vs. channel number alongside a map of the event geometry | Visualizes expected moveout across the cable — the resulting plots have a tendency to look like spaghetti |
+| `uberfigure_TERRA_only.py` | Full TERRA reference wiggle plot with labelled zoom insets and a red-highlighted channel | Renders a decimated reference wiggle for the entire TERRA cable, then draws dashed zoom boxes and expands each as a separate high-resolution sub-panel | Produced the primary visual outputs during early data exploration |
+| `uberfigure_combined.py` | Dual-cable reference wiggle combining KKFLS (negative distances) and TERRA (positive distances) with zoom insets for both | Merges the two cables into a single sorted distance axis, renders the combined reference wiggle, and produces labeled zoom panels for user-defined regions of both cables | Used to compare waveforms across both cables in a single figure |
+
+---
+
+## Typical Run Order
+
+```bash
+conda activate dasenv
+
+# 1. Browse available events and identify files to download
+python minor_das_scripts/DAS_URL_table.py
+
+# 2. Download files from Data Archives (under Event Data) and place them
+# in the folder das_records/good-events-3.2-up/
+# https://dasway.ess.washington.edu/gci
+
+# 3. Rename downloaded files to USGS ID format (set DRY_RUN = False first)
+python minor_das_scripts/DAS_USGS_File_Renaming.py
+
+# 4. Explore geometry and data quality
+python minor_das_scripts/DAS_Bathymetry.py
+python minor_das_scripts/DAS_Raw_Noise_Files.py
+python minor_das_scripts/Mapview_TERRA_events.py
+
+# 5. Main analysis
+python das/ms-das.py
+python minor_das_scripts/Noise_Analysis.py
+python minor_das_scripts/DAS_TauP_Spaghetti_Maps.py
+python minor_das_scripts/uberfigure_TERRA_only.py
+python minor_das_scripts/uberfigure_combined.py
+python minor_das_scripts/ETI2_0_Slide_Maker.py
+```
+
+---
+
+## Notes
+
+- **Caching** — `ms-das.py`, `Noise_Analysis.py`, and `DAS_TauP_Spaghetti_Maps.py` all write `.npz` and `.json` cache files into `das_figures/`. Delete the relevant cache files to force a full reprocess.
+- **`das_records/`** — HDF5 event files are not included in the repository and must be downloaded separately from the DAS data portal at https://dasway.ess.washington.edu/gci and placed in `das_records/good-events-3.2-up/`.
+

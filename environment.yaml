@@ -1,0 +1,20 @@
+name: dasenv
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  # Core scientific stack
+  - numpy
+  - pandas
+  - scipy
+  - matplotlib
+  # DAS data I/O
+  - dascore
+  - h5py
+  # Seismology
+  - obspy
+  # Mapping
+  - cartopy
+  # HTTP (for USGS API queries in Noise_Analysis.py)
+  - requests
