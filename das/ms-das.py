@@ -1,3 +1,9 @@
+# ms-das
+# Analyzes DAS earthquake records by graphically comparing 
+# theoretical and observed P & S-wave arrivals, caching intermediate 
+# states for parallel processing, and generating PDF waveform plots 
+# and a simple terminal readout of amplitude statistics.
+
 import os
 import json
 import warnings
