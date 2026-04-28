@@ -105,6 +105,13 @@ def _plot_event_figure(fname, data_array, times_sec, p_win_low, p_win_high,
                        pick_times, pick_chans, slant_km_list,
                        vmax, z_km, perc_inside, limit, figures_dir):
     """Shared plotting helper that saves a temporary PNG."""
+    
+    WAVEFORM_SCALE = 2.5    # Vertical spacing for wiggle plot
+    SCATTER_SIZE = 15       # Size of max energy markers
+    SCATTER_ALPHA = 0.2     # Transparency of markers
+    AMP_AXIS_MIN = -1       # Log scale minimum
+    AMP_AXIS_MAX = 1000     # Log scale maximum
+    
     event_id = fname.split('_')[0]
     chans = np.arange(limit)
 
@@ -112,16 +119,17 @@ def _plot_event_figure(fname, data_array, times_sec, p_win_low, p_win_high,
                                    gridspec_kw={'width_ratios': [3, 1]})
 
     for i in range(limit):
+        
         ax1.plot(times_sec,
-                 i + (data_array[:, i] / vmax) * 2.5,
+                 i + (data_array[:, i] / vmax) * WAVEFORM_SCALE,
                  color='black', lw=0.4, alpha=0.3)
 
     ax1.fill_betweenx(chans, p_win_low, p_win_high, color='blue',
                       alpha=0.1, label='P-Window (-2s/+4s)')
     ax1.fill_betweenx(chans, s_win_low, s_win_high, color='red',
                       alpha=0.1, label='S-Window (-6s/+15s)')
-    ax1.scatter(pick_times, pick_chans, color='magenta', s=15,
-                alpha=0.2, label='Max Energy', zorder=5)
+    ax1.scatter(pick_times, pick_chans, color='magenta', s=SCATTER_SIZE,
+                alpha=SCATTER_ALPHA, label='Max Energy', zorder=5)
 
     min_slant_val = slant_km_list[np.argmin(slant_km_list)]
     title_string = (f"ID: {event_id} | Depth: {z_km:.1f} km | "
@@ -139,10 +147,10 @@ def _plot_event_figure(fname, data_array, times_sec, p_win_low, p_win_high,
     ax2.set_title("Max Absolute Amplitude Profile")
     ax2.set_xlabel("Amplitude")
     ax2.set_xscale('log')
-    ax2.set_xlim(-1, 1000)
+    ax2.set_xlim(AMP_AXIS_MIN, AMP_AXIS_MAX)
     ax2.invert_yaxis()
     ax2.legend(fontsize='small')
-    ax2.grid(True, which='both', alpha=0.2)
+    ax2.grid(True, which='both', alpha=SCATTER_ALPHA)
 
     plt.tight_layout()
     temp_fig_path = os.path.join(figures_dir, f"temp_{event_id}.png")
@@ -190,11 +198,15 @@ def process_single_event(args):
 
 
     try:
+        FILTER_FREQ_LOW = 0.3     # Hz - Low-frequency cutoff
+        FILTER_FREQ_HIGH = 10.0   # Hz - High-frequency cutoff  
+        DECIMATE_DISTANCE = 20    # Decimate every Nth channel
+        
         model = TauPyModel(model="ak135")
 
         patch = dc.read(os.path.join(records_path, fname))[0]
-        patch = dcp.pass_filter(patch, time=(0.3, 10.0))
-        patch = dcp.decimate(patch, distance=20)
+        patch = dcp.pass_filter(patch, time=(FILTER_FREQ_LOW, FILTER_FREQ_HIGH))
+        patch = dcp.decimate(patch, distance=DECIMATE_DISTANCE)
         data_array = patch.get_array()
         envelope = np.abs(hilbert(data_array, axis=0))
 
@@ -217,11 +229,17 @@ def process_single_event(args):
         valid_s_channels = 0
 
         for i in range(limit):
+            P_WINDOW_BEFORE = 2   # seconds before P-wave arrival
+            P_WINDOW_AFTER = 4    # seconds after P-wave arrival
+            S_WINDOW_BEFORE = 6   # seconds before S-wave arrival
+            S_WINDOW_AFTER = 15   # seconds after S-wave arrival
+            KM_PER_DEGREE = 111.19  # Approximate km per degree latitude
+            
             row = decimated_coords.iloc[i]
             dist_deg = locations2degrees(
                 info['lat'], info['lon'], row['lat'], row['lon']
             )
-            slant_km = np.hypot(dist_deg * 111.19, z_km)
+            slant_km = np.hypot(dist_deg * KM_PER_DEGREE, z_km)
             slant_km_list.append(slant_km)
 
             arrivals = model.get_travel_times(
@@ -232,8 +250,8 @@ def process_single_event(args):
             p_t = p_arr[0] if p_arr else np.nan
             s_t = s_arr[0] if s_arr else np.nan
 
-            pw_l, pw_h = p_t - 2, p_t + 4
-            s_low, s_high = s_t - 6, s_t + 15
+            pw_l, pw_h = p_t - P_WINDOW_BEFORE, p_t + P_WINDOW_AFTER
+            s_low, s_high = s_t - S_WINDOW_BEFORE, s_t + S_WINDOW_AFTER
 
             p_win_low.append(pw_l)
             p_win_high.append(pw_h)
@@ -258,10 +276,13 @@ def process_single_event(args):
                 if s_low <= max_idx_time <= s_high:
                     inside_s_count += 1
 
+        AMPLITUDE_PERCENTILE = 99.5  # Percentile for vmax normalization
+        VMAX_FALLBACK = 1.0          # Fallback if percentile fails
+        
         perc_inside = (inside_s_count / valid_s_channels * 100
                        if valid_s_channels > 0 else 0)
         min_slant_val = slant_km_list[np.argmin(slant_km_list)]
-        vmax = np.nanpercentile(np.abs(data_array), 99.5) or 1.0
+        vmax = np.nanpercentile(np.abs(data_array), AMPLITUDE_PERCENTILE) or VMAX_FALLBACK
 
         stat_dict = {
             "event_id":       event_id,
